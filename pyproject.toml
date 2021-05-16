@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "reddit-to-sqlite"
+version = "0.1.0"
+description = ""
+authors = ["Catherine Devlin <catherine.devlin@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.9"
+typer = {extras = ["all"], version = "^0.3.2"}
+praw = "^7.2.0"
+
+[tool.poetry.dev-dependencies]
+pytest = "^5.2"
+black = "^21.5b1"
+isort = "^5.8.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+reddit-to-sqlite = "reddit_to_sqlite.main:app"
