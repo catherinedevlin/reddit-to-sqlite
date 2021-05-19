@@ -1,0 +1,33 @@
+SELECT 'post' AS item_type,
+       id,
+       title,
+       selftext AS body,
+       author,
+       subreddit,
+       approved,
+       removed,
+       num_reports,
+       url,
+       score,
+       ups,
+       downs,
+       quarantine,
+       distinguished
+FROM   posts 
+UNION ALL 
+SELECT 'comment' AS item_type, 
+       id,
+       '' AS title,
+       body,
+       author,
+       subreddit,
+       approved,
+       removed,
+       num_reports,
+       url,
+       score,
+       ups,
+       downs,
+       quarantine,
+       distinguished
+FROM   comments
