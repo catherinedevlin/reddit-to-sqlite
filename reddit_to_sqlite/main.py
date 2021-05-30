@@ -12,22 +12,25 @@ import praw
 import sqlite_utils
 import typer
 
-LOGGER = logging.getLogger(__name__)
-
 from .reddit_instance import get_auth, reddit_instance
 
-LIMIT = 10
+LIMIT = 1000
+SECONDS_IN_DAY = 60 * 60 * 24
+LOGGER = logging.getLogger(__name__)
 app = typer.Typer()
 
 
 def query_val(db, qry: str) -> Optional[int]:
+    "Safely get a single value using `qry`"
     try:
         curs = db.execute(qry)
     except sqlite3.OperationalError as exc:
         if "no such table" in str(exc):
             return None
         raise
-    return curs.fetchone()[0]
+    result = curs.fetchone()
+    LOGGER.debug(f"{qry=} {result=}")
+    return result[0]
 
 
 def latest_from_user_utc(db, table_name: str, username: str) -> Optional[int]:
@@ -38,15 +41,22 @@ def latest_from_user_utc(db, table_name: str, username: str) -> Optional[int]:
 
 def created_since(row, target_sec_utc: Optional[int]) -> bool:
 
-    return (not target_sec_utc) or (row.created_utc >= target_sec_utc)
+    result = (not target_sec_utc) or (row.created_utc >= target_sec_utc)
+    LOGGER.debug(f"{row.id=} {row.created_utc=} >= {target_sec_utc=}? {result}")
+    return result
 
 
-def save_user(db, reddit: praw.Reddit, username: str, overlap_sec: int):
-    """Saves newest posts and comments by a user"""
+def save_user(
+    db,
+    reddit: praw.Reddit,
+    username: str,
+    post_reload_sec: int,
+    comment_reload_sec: int,
+) -> None:
 
     user = reddit.redditor(username)
     latest_post_utc = latest_from_user_utc(db=db, table_name="posts", username=username)
-    get_since = latest_post_utc and (latest_post_utc - overlap_sec)
+    get_since = latest_post_utc and (latest_post_utc - post_reload_sec)
     LOGGER.info(f"Getting posts by {username} since timestamp {get_since}")
     _takewhile = partial(created_since, target_sec_utc=get_since)
 
@@ -59,8 +69,9 @@ def save_user(db, reddit: praw.Reddit, username: str, overlap_sec: int):
     latest_comment_utc = latest_from_user_utc(
         db=db, table_name="comments", username=username
     )
-    LOGGER.info(f"Getting comments by {username} since timestamp {latest_comment_utc}")
-    _takewhile = partial(created_since, target_sec_utc=latest_comment_utc)
+    get_since = latest_post_utc and (latest_post_utc - comment_reload_sec)
+    LOGGER.info(f"Getting comments by {username} since timestamp {get_since}")
+    _takewhile = partial(created_since, target_sec_utc=get_since)
 
     db["comments"].upsert_all(
         (saveable(s) for s in takewhile(_takewhile, user.comments.new(limit=LIMIT))),
@@ -75,11 +86,17 @@ def latest_post_in_subreddit_utc(db, subreddit: str) -> Optional[int]:
     return query_val(db, qry)
 
 
-def save_subreddit(db, reddit: praw.Reddit, subreddit_name: str, overlap_sec: int):
+def save_subreddit(
+    db,
+    reddit: praw.Reddit,
+    subreddit_name: str,
+    post_reload_sec: int,
+    comment_reload_sec: int,
+) -> None:
 
     subreddit = reddit.subreddit(subreddit_name)
     latest_post_utc = latest_post_in_subreddit_utc(db=db, subreddit=subreddit)
-    get_since = latest_post_utc and (latest_post_utc - overlap_sec)
+    get_since = latest_post_utc and (latest_post_utc - post_reload_sec)
     LOGGER.info(f"Getting posts in {subreddit} since timestamp {get_since}")
     _takewhile = partial(created_since, target_sec_utc=get_since)
     for post in takewhile(_takewhile, subreddit.new(limit=LIMIT)):
@@ -120,23 +137,12 @@ def interpret_target(raw_target: str) -> tuple[typing.Callable, str]:
     return SAVERS[pieces[-2]], pieces[-1]
 
 
-def get_start_epoch(raw: str) -> float:
-    if raw:
-        try:
-            days = int(raw)
-            assert days > 0, "start_date must be 1 or more days"
-            result = date.today() - timedelta(days=days)
-        except ValueError:
-            result = date.fromisoformat(raw)
-    else:
-        result = date.today() - timedelta(days=365)
-    return time.mktime(result.timetuple())
+def setup_ddl(db):
 
-
-SECONDS_IN_DAY = 60 * 60 * 24
-
-
-def setup_fts(db):
+    for tbl in ("posts", "comments"):
+        for col in ("author", "created_utc", "subreddit", "score", "removed"):
+            db[tbl].create_index([col], if_not_exists=True)
+    db["comments"].create_index(["parent_id"], if_not_exists=True)
 
     try:
         db["posts"].enable_fts(
@@ -158,33 +164,41 @@ def setup_fts(db):
         LOGGER.info(exc)
 
 
+def set_loglevel(verbosity: int):
+
+    verbosity = min(verbosity, 2)
+    LEVELS = {0: logging.WARNING, 1: logging.INFO, 2: logging.DEBUG}
+    LOGGER.setLevel(LEVELS[verbosity])
+    LOGGER.addHandler(logging.StreamHandler())
+
+
 @app.command()
 def main(
-    target: str,
-    auth: Path = Path("~/.config/reddit-to-sqlite.json"),
-    db: Path = Path("reddit.sqlite"),
-    overlap: int = 10,
+    target: str = typer.Argument(str, help="u/username or r/subreddit to collect"),
+    auth: Path = typer.Option(
+        Path("~/.config/reddit-to-sqlite.json"),
+        help="File to retrieve/save Reddit auth",
+    ),
+    db: Path = typer.Option(Path("reddit.sqlite"), help="database file"),
+    post_reload: int = typer.Option(7, help="Age of posts to reload (days)"),
+    comment_reload: int = typer.Option(7, help="Age of posts to reload (days)"),
+    verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="More logging"),
 ):
-    """Load posts and comments from Reddit to sqlite
-
-    :param target: user (u/username) or subreddit (r/subreddit) to capture
-    :type target: str, required
-    :param auth: file to get/save Reddit credentials
-                 defaults to "~/.config/reddit-to-sqlite.json")
-    :type auth: Path, optional
-    :param db: sqlite file name/path to save into, defaults to "reddit.sqlite"
-    :type auth: Path, optional
-    :param start: how far back to go; number of days, or YYYY-MM-DD
-    :type start_date: str, optional
-
-    """
+    """Load posts and comments from Reddit to sqlite."""
+    set_loglevel(verbosity=verbose)
     reddit = reddit_instance(get_auth(auth.expanduser()))
     saver, save_me = interpret_target(target)
     database = sqlite_utils.Database(db.expanduser())
-    saver(database, reddit, save_me, overlap_sec=overlap * SECONDS_IN_DAY)
+    saver(
+        database,
+        reddit,
+        save_me,
+        post_reload_sec=post_reload * SECONDS_IN_DAY,
+        comment_reload_sec=comment_reload * SECONDS_IN_DAY,
+    ),
     ITEM_VIEW_DEF = (Path(__file__).parent / "view_def.sql").read_text()
     database.create_view("items", ITEM_VIEW_DEF, replace=True)
-    setup_fts(database)
+    setup_ddl(database)
 
 
 if __name__ == "__main__":

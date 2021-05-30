@@ -1,11 +1,7 @@
-import json
-import pathlib
-from datetime import date, timedelta
-from unittest.mock import create_autospec, patch
+from unittest.mock import create_autospec
 
 import praw
 import pytest
-import sqlite_utils
 
 from reddit_to_sqlite import main
 
@@ -52,12 +48,3 @@ class FakePost:
 def test_saveable():
     expected = {"subreddit": "MadeMeSmile", "score": 22, "title": "blah blah blah"}
     assert main.saveable(FakePost()) == expected
-
-
-def test_get_start_epoch():
-    assert main.get_start_epoch(None) == date.today() - timedelta(days=365)
-    assert main.get_start_epoch("2021-03-21") == date(2021, 3, 21)
-    assert main.get_start_epoch("100") == date.today() - timedelta(days=100)
-    assert main.get_start_epoch("-100") == date.today() - timedelta(days=100)
-    with pytest.raises(ValueError):
-        main.get_start_epoch("time immemorial")
