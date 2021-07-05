@@ -118,10 +118,25 @@ def legalize(val):
     return val
 
 
-def saveable(item: praw.models.reddit.base.RedditBase) -> dict:
+def _parent_ids_interpreted(dct: dict[str, typing.Any]) -> dict[str, typing.Any]:
+
+    if not dct.get('parent_id'):
+        return dct 
+    
+    prefix = dct['parent_id'][:3]
+    dct['parent_clean_id'] = dct['parent_id'][3:]
+    if prefix == 't1_':
+        dct['parent_comment_id'] = dct['parent_clean_id']
+    elif prefix == 't3_':
+        dct['parent_post_id'] = dct['parent_clean_id']
+    return dct
+
+def saveable(item: praw.models.reddit.base.RedditBase) -> dict[str, typing.Any]:
+
     """Generate a saveable dict from an instance"""
 
-    return {k: legalize(v) for k, v in item.__dict__.items() if not k.startswith("_")}
+    result = {k: legalize(v) for k, v in item.__dict__.items() if not k.startswith("_")}
+    return _parent_ids_interpreted(result) 
 
 
 def interpret_target(raw_target: str) -> tuple[typing.Callable, str]:
@@ -136,32 +151,33 @@ def interpret_target(raw_target: str) -> tuple[typing.Callable, str]:
     assert pieces[-2] in SAVERS, HELP
     return SAVERS[pieces[-2]], pieces[-1]
 
+def create_index(db, tbl, col):
+    try:
+        db[tbl].create_index([col], if_not_exists=True)
+    except sqlite3.OperationalError as exc:
+        LOGGER.warn(f"Error indexing {tbl}.{col}: {exc}")
+
+def create_fts_index(db, tbl, cols):
+    try:
+        db[tbl].enable_fts(
+            cols, tokenize="porter", create_triggers=True
+        )
+    except sqlite3.OperationalError as exc:
+        LOGGER.info(f"While setting up full-text search on {tbl}.{cols}:")
+        LOGGER.info(exc)
+ 
+
 
 def setup_ddl(db):
 
     for tbl in ("posts", "comments"):
         for col in ("author", "created_utc", "subreddit", "score", "removed"):
-            db[tbl].create_index([col], if_not_exists=True)
-    db["comments"].create_index(["parent_id"], if_not_exists=True)
+            create_index(db, tbl, col)
+    for col in ("parent_clean_id", "parent_comment_id", "parent_post_id"):
+        create_index(db, 'comments', col)
 
-    try:
-        db["posts"].enable_fts(
-            ["title", "selftext"], tokenize="porter", create_triggers=True
-        )
-    except sqlite3.OperationalError as exc:
-        LOGGER.info("While setting up full-text search:")
-        LOGGER.info(exc)
-    try:
-        db["comments"].enable_fts(
-            [
-                "body",
-            ],
-            tokenize="porter",
-            create_triggers=True,
-        )
-    except sqlite3.OperationalError as exc:
-        LOGGER.info("While setting up full-text search:")
-        LOGGER.info(exc)
+    create_fts_index(db, 'posts', ['title', 'selftext']) 
+    create_fts_index(db, 'comments', ['body', ]) 
 
 
 def set_loglevel(verbosity: int):
@@ -179,7 +195,7 @@ def main(
         Path("~/.config/reddit-to-sqlite.json"),
         help="File to retrieve/save Reddit auth",
     ),
-    db: Path = typer.Option(Path("reddit.sqlite"), help="database file"),
+    db: Path = typer.Option(Path("reddit.db"), help="database file"),
     post_reload: int = typer.Option(7, help="Age of posts to reload (days)"),
     comment_reload: int = typer.Option(7, help="Age of posts to reload (days)"),
     verbose: int = typer.Option(0, "--verbose", "-v", count=True, help="More logging"),

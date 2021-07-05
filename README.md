@@ -13,7 +13,7 @@ view.
     reddit-to-sqlite u/catherinedevlin 
     reddit-to-sqlite --help 
 
-By default, writes to a local `reddit.sqlite` database (change with `--db`).
+By default, writes to a local `reddit.db` database (change with `--db`).
 
 ## Authorizing
 
@@ -48,3 +48,8 @@ When loading an individual user's comments, by default reddit_to_sql stops just 
 reaching the most recent comment that is already recorded in the database.  However, if you're 
 interested in comment scores, you may want to impose a longer `--comment_reload`, since scores 
 may keep changing for longer than a single day after the comment is posted.
+
+## Notes
+
+- `author` is saved in case-sensitive form, so case-insensitive searching with `LIKE` 
+may be helpful.
